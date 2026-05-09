@@ -24,12 +24,48 @@
 
 #include <string>
 #include <fstream>
+#include <cctype>
+#include <cstdlib>
 
 
 using std::string;
 using std::vector;
 
 std::unique_ptr<EventHandler> EventHandler::_eventHandlerStatic;
+
+namespace
+{
+    const unsigned long long KEYBOARD_EV_BITS = 0x120013;
+
+    int parseEventId(const string &handlers)
+    {
+        auto eventPos = handlers.find("event");
+        if (eventPos == string::npos)
+            return -1;
+
+        eventPos += 5;
+        auto eventEnd = eventPos;
+        while (eventEnd < handlers.size() && std::isdigit(static_cast<unsigned char>(handlers[eventEnd])))
+            ++eventEnd;
+
+        if (eventEnd == eventPos)
+            return -1;
+
+        return std::stoi(handlers.substr(eventPos, eventEnd - eventPos));
+    }
+
+    bool hasKeyboardEventBits(const string &line)
+    {
+        auto evPos = line.find("EV=");
+        if (evPos == string::npos)
+            return false;
+
+        evPos += 3;
+        char *end = nullptr;
+        auto evBits = std::strtoull(line.c_str() + evPos, &end, 16);
+        return (evBits & KEYBOARD_EV_BITS) == KEYBOARD_EV_BITS;
+    }
+}
 
 
 EventHandler::EventHandler()
@@ -218,11 +254,34 @@ void EventHandler::createInputEvent()
 
         Device temp;
         vector<Device> devices;
+        bool isBluetoothDevice = false;
+        bool hasKeyboardHandler = false;
+        bool hasKeyboardEv = false;
 
+        auto addDeviceIfKeyboard = [&]() {
+            if (!temp.name.empty() && isBluetoothDevice && hasKeyboardHandler && hasKeyboardEv && temp.eventID >= 0)
+                devices.push_back(temp);
+
+            temp = {};
+            temp.eventID = -1;
+            isBluetoothDevice = false;
+            hasKeyboardHandler = false;
+            hasKeyboardEv = false;
+        };
+
+        temp.eventID = -1;
         while(std::getline(infile, line))
         {
+            if (line.empty()){
+                addDeviceIfKeyboard();
+                continue;
+            }
+
             switch (line.front())
             {
+                case 'I':
+                    isBluetoothDevice = line.find("Bus=0005") != std::string::npos;
+                    break;
                 case 'N':
                     temp.name = line.substr(line.find('=')+1);
                     break;
@@ -234,21 +293,17 @@ void EventHandler::createInputEvent()
                     break;
                 case 'H':
                     {
-                        string handlers =line.substr(line.find('=')+1);
-                        int t = handlers.find("event");
-                        if (t != std::string::npos){
-                            handlers = handlers.substr(t);
-                            handlers = handlers.substr(5,1);
-                            temp.eventID = std::stoi(handlers);
-                        }
+                        string handlers = line.substr(line.find('=')+1);
+                        hasKeyboardHandler = handlers.find("kbd") != std::string::npos;
+                        temp.eventID = parseEventId(handlers);
                         break;
                     }
-            }
-            if (line.empty() && !temp.name.empty() && temp.eventID > 6){
-                devices.push_back(temp);
-                temp = {};
+                case 'B':
+                    hasKeyboardEv = hasKeyboardEv || hasKeyboardEventBits(line);
+                    break;
             }
         }
+        addDeviceIfKeyboard();
 
         switch (devices.size())
         {
